@@ -23,11 +23,13 @@
       devShell = forAllSystems (system: let haskellPackages = nixpkgsFor.${system}.haskellPackages;
         in haskellPackages.shellFor {
           packages = p: [self.packages.${system}.typedtc];
-          withHoogle = false;
+          withHoogle = true;
           buildInputs = with haskellPackages; [
             haskell-language-server
             ghcid
             cabal-install
+            fourmolu
+            hlint
           ];
         # Change the prompt to show that you are in a devShell
         # shellHook = "export PS1='\\e[1;34mdev > \\e[0m'";
