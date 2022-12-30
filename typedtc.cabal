@@ -10,13 +10,17 @@ common warnings
 library
     import:           warnings
     exposed-modules:  TypedTC.Checker
+                      TypedTC.Parser
+                      TypedTC.AST
     build-depends:    base ^>=4.16.3.0
                     , HList
-                    , singletons
+                    , text
+                    , megaparsec
+                    , parser-combinators
     hs-source-dirs:   src
     default-language: GHC2021
 
-test-suite typed-tc-test
+test-suite typedtc-test
     import:           warnings
     default-language: GHC2021
     type:             exitcode-stdio-1.0
@@ -24,6 +28,8 @@ test-suite typed-tc-test
     main-is:          Main.hs
     build-depends:
         base ^>=4.16.3.0
+      , text
+      , megaparsec
       , tasty
       , tasty-hedgehog
       , tasty-hunit

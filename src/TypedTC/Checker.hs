@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -7,6 +8,8 @@ module TypedTC.Checker where
 import Data.Data (Proxy (..))
 import Data.HList (HList (..), HLookupByHNat (..), HNat (..), hLookupByHNat, hSucc, (.*.))
 import Data.Kind (Type)
+import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Type.Equality (type (:~:) (Refl))
 import Numeric.Natural (Natural)
 
@@ -16,15 +19,17 @@ data UTerm
     | UNat Natural
     | USucc UTerm
     | UNatElim UTerm UTerm UTerm
-    | UVar String
-    | ULambda String UType UTerm
+    | UVar Text
+    | ULambda Text UType UTerm
     | UApp UTerm UTerm
     | UIf UTerm UTerm UTerm
+    deriving (Eq, Show)
 
 data UType
     = UTBool
     | UTNat
     | UTLambda UType UType
+    deriving (Eq, Show)
 
 data TY a where
     TYBool :: TY Bool
@@ -70,9 +75,9 @@ utype2ty (UTLambda a b) =
 
 data TypeContext ts where
     EmptyTC :: TypeContext '[]
-    AddType :: TY t -> String -> TypeContext ts -> TypeContext (t ': ts)
+    AddType :: TY t -> Text -> TypeContext ts -> TypeContext (t ': ts)
 
-tcLookup :: TypeContext ts -> String -> Either String (Typed (Term ts))
+tcLookup :: TypeContext ts -> Text -> Either Text (Typed (Term ts))
 tcLookup EmptyTC varName = Left $ "Name not found: " <> varName
 tcLookup (AddType ty var more) varName
     | var == varName = Right (Typed ty (TVar (Proxy @'HZero)))
@@ -82,7 +87,7 @@ tcLookup (AddType ty var more) varName
             Typed ty' (TVar n) -> Right $ Typed ty' (TVar (hSucc n))
             _ -> Left "Internal error in tcLookup"
 
-typeCheck :: TypeContext ts -> UTerm -> Either String (Typed (Term ts))
+typeCheck :: TypeContext ts -> UTerm -> Either Text (Typed (Term ts))
 typeCheck ctx (UVar varName) = tcLookup ctx varName
 typeCheck ctx (ULambda argName argType body) =
     case utype2ty argType of
@@ -174,14 +179,14 @@ eval e (TVar n) = envLookup e n
 eval' :: Term '[] a -> a
 eval' = eval HNil
 
-evalToNat :: UTerm -> Either String Natural
+evalToNat :: UTerm -> Either Text Natural
 evalToNat term = do
     typed <- typeCheck EmptyTC term
     case typed of
         Typed ty tterm -> do
             case ty of
                 TYNat -> Right $ eval' tterm
-                _ -> Left $ "typecheck result /= Nat: " <> show ty
+                _ -> Left $ "typecheck result /= Nat: " <> T.pack (show ty)
 
 envLookup :: HLookupByHNat n env => HList env -> Proxy n -> HLookupByHNatR n env
 envLookup xs n = hLookupByHNat n xs

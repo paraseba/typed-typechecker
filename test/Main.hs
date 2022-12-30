@@ -3,6 +3,8 @@
 
 module Main (main) where
 
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Text qualified as T
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -10,7 +12,10 @@ import Numeric.Natural (Natural)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.Hedgehog
+import Text.Megaparsec
+import TypedTC.AST qualified as AST
 import TypedTC.Checker
+import TypedTC.Parser qualified as P
 
 main :: IO ()
 main = defaultMain tests
@@ -56,6 +61,71 @@ units =
             , testCase "can tc sum" unit_can_tc_sum
             , testCase "can tc mul" unit_can_tc_mul
             , testCase "can tc fact" unit_can_tc_fact
+            , dontTCCase $ UIf (UBool True) (UBool False) (UNat 1)
+            , dontTCCase $ UIf (UNat 1) (UNat 1) (UNat 1)
+            , dontTCCase $ USucc (UBool True)
+            , dontTCCase $ UApp (UBool True) (UBool True)
+            , dontTCCase $ UNatElim (UBool True) (UBool True) (UNat 5)
+            , dontTCCase $ UNatElim (UBool True) (ULambda "n" UTNat (ULambda "x" UTBool (UNat 42))) (UNat 5)
+            ]
+        , testGroup
+            "AST generation"
+            [ testCase "ast not" unit_ast_not
+            , testCase "ast sum" unit_ast_sum
+            ]
+        , testGroup
+            "Parser"
+            [ parserCase "42" (P.LiteralNat 42)
+            , parserCase "(42)" (P.LiteralNat 42)
+            , parserCase " ( 42 ) " (P.LiteralNat 42)
+            , parserCase "True" (P.LiteralBool True)
+            , parserCase "  True " (P.LiteralBool True)
+            , parserCase "  (True) " (P.LiteralBool True)
+            , parserCase "  ( False ) " (P.LiteralBool False)
+            , parserCase "Succ 42" (P.Succ (P.LiteralNat 42))
+            , parserCase "Succ (42)" (P.Succ (P.LiteralNat 42))
+            , parserCase "(Succ 42)" (P.Succ (P.LiteralNat 42))
+            , parserCase " ( Succ   42 )  " (P.Succ (P.LiteralNat 42))
+            , parserCase "  Succ (if True then 1 else 2)" (P.Succ (P.If (P.LiteralBool True) (P.LiteralNat 1) (P.LiteralNat 2)))
+            , parserCase "if True then 1 else 2" (P.If (P.LiteralBool True) (P.LiteralNat 1) (P.LiteralNat 2))
+            , parserCase " if   True then (1) else 2  " (P.If (P.LiteralBool True) (P.LiteralNat 1) (P.LiteralNat 2))
+            , parserCase "if True then Succ 1 else (Succ 2)" (P.If (P.LiteralBool True) (P.Succ (P.LiteralNat 1)) (P.Succ (P.LiteralNat 2)))
+            , parserCase "a" (P.Var "a")
+            , parserCase "_a42" (P.Var "_a42")
+            , parserCase " a " (P.Var "a")
+            , parserCase " (a) " (P.Var "a")
+            , parserCase " ( a42 ) " (P.Var "a42")
+            , parserCase "a b" (P.App (P.Var "a") (P.Var "b"))
+            , parserCase "a b" (P.App (P.Var "a") (P.Var "b"))
+            , parserCase "a b c" (P.App (P.App (P.Var "a") (P.Var "b")) (P.Var "c"))
+            , parserCase " a ( b ) c " (P.App (P.App (P.Var "a") (P.Var "b")) (P.Var "c"))
+            , parserCase " a ( b c) d " (P.App (P.App (P.Var "a") (P.App (P.Var "b") (P.Var "c"))) (P.Var "d"))
+            , parserCase "natElim a b c" (P.NatElim (P.Var "a") (P.Var "b") (P.Var "c"))
+            , parserCase "natElim (a) b (c)" (P.NatElim (P.Var "a") (P.Var "b") (P.Var "c"))
+            , parserCase " natElim ( a ) b   (    c) " (P.NatElim (P.Var "a") (P.Var "b") (P.Var "c"))
+            , parserCase "natElim a (b c) d" (P.NatElim (P.Var "a") (P.App (P.Var "b") (P.Var "c")) (P.Var "d"))
+            , parserCase "natElim a b c result" (P.App (P.NatElim (P.Var "a") (P.Var "b") (P.Var "c")) (P.Var "result"))
+            , parserCase "\\ (x :: Nat) -> x" (P.Lambda (("x", P.PNat) :| []) (P.Var "x"))
+            , parserCase "λ (x :: Nat) → x" (P.Lambda (("x", P.PNat) :| []) (P.Var "x"))
+            , parserCase "  λ(x :: Nat)   →  (x ) " (P.Lambda (("x", P.PNat) :| []) (P.Var "x"))
+            , parserCase "λ (x :: Nat) (y :: Bool) → x y" (P.Lambda (("x", P.PNat) :| [("y", P.PBool)]) (P.App (P.Var "x") (P.Var "y")))
+            , parserCase " λ(x :: Nat)(y :: Bool)  → ((x y)) " (P.Lambda (("x", P.PNat) :| [("y", P.PBool)]) (P.App (P.Var "x") (P.Var "y")))
+            , parserCase "λ(f :: Nat -> Nat) → f 1" (P.Lambda (("f", P.PFun P.PNat P.PNat) :| []) (P.App (P.Var "f") (P.LiteralNat 1)))
+            , parserCase "λ (x :: Nat) → λ (y :: Nat) → y" (P.Lambda (("x", P.PNat) :| []) (P.Lambda (("y", P.PNat) :| []) (P.Var "y")))
+            , parserCase "λ (x :: Nat) → λ (y :: Nat) → λ (z :: Nat) → y" (P.Lambda (("x", P.PNat) :| []) (P.Lambda (("y", P.PNat) :| []) (P.Lambda (("z", P.PNat) :| []) (P.Var "y"))))
+            , parserCase "(λ (x :: Nat) → x) 42" (P.App (P.Lambda (("x", P.PNat) :| []) (P.Var "x")) (P.LiteralNat 42))
+            , unparseableCase "42n"
+            , unparseableCase "  TrueXXX "
+            , unparseableCase "(True"
+            , unparseableCase " if Truethen 1 else 2"
+            , unparseableCase " if True then 1else 2"
+            , unparseableCase " if True then 1 else2"
+            , unparseableCase "λ x → x"
+            , unparseableCase "λ x x"
+            , unparseableCase "λ x. x"
+            , unparseableCase "λ (x) → x"
+            , unparseableCase "λ (x Nat) → x"
+            , unparseableCase "λ (x :: Nat → x"
             ]
         ]
 
@@ -72,7 +142,7 @@ assertType uterm ty = do
     case res of
         Right (Typed ty' _) -> do
             assertBool ("Invalid type: " <> show ty <> " /= " <> show ty') $ ty `tyEq` ty'
-        Left e -> assertFailure $ "Cannot type check: " <> e
+        Left e -> assertFailure $ "Cannot type check: " <> T.unpack e
 
 anyNatural :: Gen Natural
 anyNatural = Gen.integral (Range.linear 0 (2 * fromIntegral (maxBound :: Int)))
@@ -157,6 +227,41 @@ unit_can_tc_mul = assertType uMul (TYLambda TYNat (TYLambda TYNat TYNat))
 
 unit_can_tc_fact :: Assertion
 unit_can_tc_fact = assertType uFact (TYLambda TYNat TYNat)
+
+unit_ast_not :: Assertion
+unit_ast_not = do
+    Right (P.StExpr e) <- pure $ P.parseStatement "λ (b :: Bool) → if b then False else True"
+    Right uterm <- pure $ AST.ast e
+    uNot @?= uterm
+
+unit_ast_sum :: Assertion
+unit_ast_sum = do
+    Right (P.StExpr e) <- pure $ P.parseStatement "(λ (n :: Nat) → (natElim (λ (n :: Nat) → n) (λ (_ :: Nat) (f :: Nat → Nat) → (λ (n :: Nat) → Succ (f n))) n))"
+    Right uterm <- pure $ AST.ast e
+    uterm @?= uSum
+
+dontTCCase :: UTerm -> TestTree
+dontTCCase uterm = testCase ("Untypeable: " <> show uterm) $ do
+    let typed = typeCheck EmptyTC uterm
+    case typed of
+        Left _ -> pure ()
+        Right (Typed ty _) -> assertFailure $ "Unexpected type check. Type: " <> show ty
+
+assertParsedExp :: HasCallStack => P.Expr -> T.Text -> Assertion
+assertParsedExp expr s =
+    case P.parseStatement s of
+        Left e -> assertFailure (errorBundlePretty e)
+        Right (P.StExpr expr') -> expr @=? expr'
+        Right _ -> assertFailure "Not an expression"
+
+parserCase :: T.Text -> P.Expr -> TestTree
+parserCase input expr = testCase (T.unpack input) (assertParsedExp expr input)
+
+unparseableCase :: T.Text -> TestTree
+unparseableCase input = testCase (T.unpack ("Unparseable: " <> input)) $
+    case P.parseStatement input of
+        Left _ -> pure ()
+        Right res -> assertFailure ("Unexpeced parseable input. Got: " <> show res)
 
 uNot :: UTerm
 uNot = ULambda "b" UTBool (UIf (UVar "b") (UBool False) (UBool True))
