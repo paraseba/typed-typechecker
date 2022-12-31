@@ -2,11 +2,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE LambdaCase #-}
 
 module TypedTC.Checker where
 
 import Data.Data (Proxy (..))
-import Data.HList (HList (..), HLookupByHNat (..), HNat (..), hLookupByHNat, hSucc, (.*.))
+import Data.HList (
+    HList (..),
+    HLookupByHNat (..),
+    HNat (..),
+    hLookupByHNat,
+    hSucc,
+    (.*.),
+ )
 import Data.Kind (Type)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -36,19 +44,20 @@ data TY a where
     TYNat :: TY Natural
     TYLambda :: TY a -> TY b -> TY (a -> b)
 
-instance Eq (TY a) where
-    TYBool == TYBool = True
-    TYNat == TYNat = True
-    TYLambda a b == TYLambda a' b' = a == a' && b == b'
-
-instance Show (TY a) where
-    show = showType
-
 tyEq :: TY a -> TY b -> Bool
 TYBool `tyEq` TYBool = True
 TYNat `tyEq` TYNat = True
 TYLambda a b `tyEq` TYLambda a' b' = a `tyEq` a' && b `tyEq` b'
 _ `tyEq` _ = False
+
+instance Eq (TY a) where
+    (==) = tyEq
+
+instance Show (TY a) where
+    show :: TY a -> String
+    show TYBool = "Bool"
+    show TYNat = "Nat"
+    show (TYLambda a b) = show a <> " -> " <> show b
 
 type Term :: [Type] -> Type -> Type
 data Term env ty where
@@ -61,63 +70,88 @@ data Term env ty where
     TVar :: forall (n :: HNat) (env :: [Type]). HLookupByHNat n env => Proxy n -> Term env (HLookupByHNatR n env)
     TApp :: Term env (a -> b) -> Term env a -> Term env b
 
-data Typed k = forall t. Typed (TY t) (k t)
+data Typed ts where
+    Typed :: (TY t) -> (Term ts t) -> Typed ts
 
--- fixme ugly []
-utype2ty :: UType -> Typed []
-utype2ty UTBool = Typed TYBool []
-utype2ty UTNat = Typed TYNat []
+data SomeType where
+    SomeType :: TY t -> SomeType
+
+utype2ty :: UType -> SomeType
+utype2ty UTBool = SomeType TYBool
+utype2ty UTNat = SomeType TYNat
 utype2ty (UTLambda a b) =
-    case utype2ty a of
-        Typed a' _ ->
-            case utype2ty b of
-                Typed b' _ -> Typed (TYLambda a' b') []
+    case (utype2ty a, utype2ty b) of
+        (SomeType a', SomeType b') -> SomeType (TYLambda a' b')
 
 data TypeContext ts where
     EmptyTC :: TypeContext '[]
     AddType :: TY t -> Text -> TypeContext ts -> TypeContext (t ': ts)
 
-tcLookup :: TypeContext ts -> Text -> Either Text (Typed (Term ts))
+data TCIndex ts where
+    TCIndex :: HLookupByHNat n ts => Proxy n -> TY (HLookupByHNatR n ts) -> TCIndex ts
+
+tcLookup :: TypeContext ts -> Text -> Either Text (TCIndex ts)
 tcLookup EmptyTC varName = Left $ "Name not found: " <> varName
 tcLookup (AddType ty var more) varName
-    | var == varName = Right (Typed ty (TVar (Proxy @'HZero)))
+    | var == varName = Right (TCIndex (Proxy @'HZero) ty)
     | otherwise = do
         recur <- tcLookup more varName
         case recur of
-            Typed ty' (TVar n) -> Right $ Typed ty' (TVar (hSucc n))
-            _ -> Left "Internal error in tcLookup"
+            TCIndex n ty' -> Right $ TCIndex (hSucc n) ty'
 
-typeCheck :: TypeContext ts -> UTerm -> Either Text (Typed (Term ts))
-typeCheck ctx (UVar varName) = tcLookup ctx varName
+index2var :: TCIndex ts -> Typed ts
+index2var (TCIndex n ty) = Typed ty (TVar n)
+
+withType :: TypeContext ts -> UTerm -> (forall t. (TY t, Term ts t) -> Either Text a) -> Either Text a
+withType ctx uterm f = do
+    typed <- typeCheck ctx uterm
+    case typed of
+        Typed ty term -> f (ty, term)
+
+expectType :: Typed ts -> TY t -> Text -> Either Text (Term ts t)
+expectType typed ty err = 
+   case typed of
+        Typed ty' term ->
+           case sameType ty' ty of
+              Just Refl -> pure term
+              Nothing -> Left err
+
+typeCheckTo :: TypeContext ts -> UTerm -> TY t -> Text -> Either Text (Term ts t)
+typeCheckTo ctx uterm ty err =
+    typeCheck ctx uterm >>= \term -> expectType term ty err
+
+
+typeCheck :: TypeContext ts -> UTerm -> Either Text (Typed ts)
+typeCheck ctx (UVar varName) = index2var <$> tcLookup ctx varName
+{-
 typeCheck ctx (ULambda argName argType body) =
     case utype2ty argType of
-        Typed argType' _ -> do
+        SomeType argType' -> do
             body' <- typeCheck (AddType argType' argName ctx) body
             case body' of
                 Typed bodyTy bodyTerm ->
                     pure $ Typed (TYLambda argType' bodyTy) (TLambda argType' bodyTerm)
+                    -}
+
+typeCheck ctx (ULambda argName argType body) =
+    case utype2ty argType of
+        SomeType argType' -> do
+            withType (AddType argType' argName ctx) body $ \case
+                (bodyTy, bodyTerm) ->
+                    pure $ Typed (TYLambda argType' bodyTy) (TLambda argType' bodyTerm)
+
 typeCheck _ (UBool b) = pure $ Typed TYBool (TBool b)
 typeCheck _ (UNat n) = pure $ Typed TYNat (TNat n)
 typeCheck ctx (UIf cond true false) = do
-    cond' <- typeCheck ctx cond
-    case cond' of
-        Typed TYBool condTerm -> do
-            true' <- typeCheck ctx true
-            case true' of
-                Typed tt trueTerm -> do
-                    false' <- typeCheck ctx false
-                    case false' of
-                        Typed ft falseTerm -> do
-                            case sameType tt ft of
-                                Nothing -> Left "Branches of an if must be of the same type"
-                                Just Refl -> pure $ Typed tt (TIf condTerm trueTerm falseTerm)
-        Typed _ _ -> Left "Invalid If condition type"
+    condTerm <- typeCheckTo ctx cond TYBool "Invalid If condition type"
+    true' <- typeCheck ctx true
+    case true' of
+        Typed tt trueTerm -> do
+            falseTerm <- typeCheckTo ctx false tt "Branches of an if must be of the same type"
+            pure $ Typed tt (TIf condTerm trueTerm falseTerm)
 typeCheck ctx (USucc n) = do
-    n' <- typeCheck ctx n
-    case n' of
-        Typed TYNat nTerm -> do
-            pure $ Typed TYNat (TSucc nTerm)
-        Typed _ _ -> Left "Invalid argument to Succ"
+    nTerm <- typeCheckTo ctx n TYNat "Succ argument must have type Nat"
+    pure $ Typed TYNat (TSucc nTerm)
 typeCheck ctx (UNatElim z suc n) = do
     z' <- typeCheck ctx z
     case z' of
@@ -159,6 +193,7 @@ sameType (TYLambda a b) (TYLambda c d) = do
 sameType _ _ = Nothing
 
 -- shouldntCompile = TLambda TYBool (TIf (TVar (Proxy @('HSucc 'HZero))) (TBool False) (TBool True))
+-- shouldCompile   = TLambda TYBool (TIf (TVar (Proxy @'HZero         )) (TBool False) (TBool True))
 
 eval :: HList env -> Term env a -> a
 eval _ (TBool b) = b
@@ -174,7 +209,7 @@ eval e (TNatElim z suc n) =
             sucm -> suc' sucm (eval e (TNatElim z suc (TNat (sucm - 1))))
 eval e (TApp f arg) = eval e f (eval e arg)
 eval e (TLambda _ term) = \x -> eval (x .*. e) term
-eval e (TVar n) = envLookup e n
+eval e (TVar n) = hLookupByHNat n e
 
 eval' :: Term '[] a -> a
 eval' = eval HNil
@@ -187,11 +222,3 @@ evalToNat term = do
             case ty of
                 TYNat -> Right $ eval' tterm
                 _ -> Left $ "typecheck result /= Nat: " <> T.pack (show ty)
-
-envLookup :: HLookupByHNat n env => HList env -> Proxy n -> HLookupByHNatR n env
-envLookup xs n = hLookupByHNat n xs
-
-showType :: TY a -> String
-showType TYBool = "Bool"
-showType TYNat = "Nat"
-showType (TYLambda a b) = showType a <> " -> " <> showType b

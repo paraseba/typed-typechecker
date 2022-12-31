@@ -61,6 +61,7 @@ units =
             , testCase "can tc sum" unit_can_tc_sum
             , testCase "can tc mul" unit_can_tc_mul
             , testCase "can tc fact" unit_can_tc_fact
+            , dontTCCase $ ULambda "x" UTNat (UVar "y")
             , dontTCCase $ UIf (UBool True) (UBool False) (UNat 1)
             , dontTCCase $ UIf (UNat 1) (UNat 1) (UNat 1)
             , dontTCCase $ USucc (UBool True)
