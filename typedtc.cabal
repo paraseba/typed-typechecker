@@ -22,10 +22,16 @@ library
 
 test-suite typedtc-test
     import:           warnings
+    ghc-options:
+        -O2
+        -threaded
+        -rtsopts
+        "-with-rtsopts=-N"
     default-language: GHC2021
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Main.hs
+    other-modules:    Gen
     build-depends:
         base ^>=4.16.3.0
       , text
@@ -34,4 +40,7 @@ test-suite typedtc-test
       , tasty-hedgehog
       , tasty-hunit
       , hedgehog
+      , containers
+      , mtl
+      , streams
       , typedtc

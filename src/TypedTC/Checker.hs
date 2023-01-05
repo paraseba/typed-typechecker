@@ -1,8 +1,8 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE LambdaCase #-}
 
 module TypedTC.Checker where
 
@@ -17,7 +17,6 @@ import Data.HList (
  )
 import Data.Kind (Type)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Type.Equality (type (:~:) (Refl))
 import Numeric.Natural (Natural)
 
@@ -37,7 +36,7 @@ data UType
     = UTBool
     | UTNat
     | UTLambda UType UType
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data TY a where
     TYBool :: TY Bool
@@ -109,44 +108,31 @@ withType ctx uterm f = do
         Typed ty term -> f (ty, term)
 
 expectType :: Typed ts -> TY t -> Text -> Either Text (Term ts t)
-expectType typed ty err = 
-   case typed of
+expectType typed ty err =
+    case typed of
         Typed ty' term ->
-           case sameType ty' ty of
-              Just Refl -> pure term
-              Nothing -> Left err
+            case sameType ty' ty of
+                Just Refl -> pure term
+                Nothing -> Left err
 
 typeCheckTo :: TypeContext ts -> UTerm -> TY t -> Text -> Either Text (Term ts t)
 typeCheckTo ctx uterm ty err =
     typeCheck ctx uterm >>= \term -> expectType term ty err
 
-
 typeCheck :: TypeContext ts -> UTerm -> Either Text (Typed ts)
 typeCheck ctx (UVar varName) = index2var <$> tcLookup ctx varName
-{-
-typeCheck ctx (ULambda argName argType body) =
-    case utype2ty argType of
-        SomeType argType' -> do
-            body' <- typeCheck (AddType argType' argName ctx) body
-            case body' of
-                Typed bodyTy bodyTerm ->
-                    pure $ Typed (TYLambda argType' bodyTy) (TLambda argType' bodyTerm)
-                    -}
-
 typeCheck ctx (ULambda argName argType body) =
     case utype2ty argType of
         SomeType argType' -> do
             withType (AddType argType' argName ctx) body $ \case
                 (bodyTy, bodyTerm) ->
                     pure $ Typed (TYLambda argType' bodyTy) (TLambda argType' bodyTerm)
-
 typeCheck _ (UBool b) = pure $ Typed TYBool (TBool b)
 typeCheck _ (UNat n) = pure $ Typed TYNat (TNat n)
 typeCheck ctx (UIf cond true false) = do
     condTerm <- typeCheckTo ctx cond TYBool "Invalid If condition type"
-    true' <- typeCheck ctx true
-    case true' of
-        Typed tt trueTerm -> do
+    withType ctx true $ \case
+        (tt, trueTerm) -> do
             falseTerm <- typeCheckTo ctx false tt "Branches of an if must be of the same type"
             pure $ Typed tt (TIf condTerm trueTerm falseTerm)
 typeCheck ctx (USucc n) = do
@@ -163,11 +149,8 @@ typeCheck ctx (UNatElim z suc n) = do
                         Just Refl -> do
                             case sameType resTy'' resTy of
                                 Just Refl -> do
-                                    n' <- typeCheck ctx n
-                                    case n' of
-                                        Typed TYNat nTerm ->
-                                            pure $ Typed resTy (TNatElim zTerm succTerm nTerm)
-                                        _ -> Left "UNatElim's third argument must be a Nat"
+                                    nTerm <- typeCheckTo ctx n TYNat "UNatElim's third argument must be a Nat"
+                                    pure $ Typed resTy (TNatElim zTerm succTerm nTerm)
                                 Nothing -> Left "UNatElim second argument must return the same type as first argument"
                         Nothing -> Left "UNatElim's second agument must be: a -> a"
                 _ -> Left "UnatElim's second argument must be a function"
@@ -175,12 +158,8 @@ typeCheck ctx (UApp f arg) = do
     f' <- typeCheck ctx f
     case f' of
         Typed (TYLambda a b) fTerm -> do
-            arg' <- typeCheck ctx arg
-            case arg' of
-                Typed argType argTerm ->
-                    case sameType a argType of
-                        Nothing -> Left "Wrong argument type for lambda"
-                        Just Refl -> pure $ Typed b (TApp fTerm argTerm)
+            argTerm <- typeCheckTo ctx arg a "Wrong argument type for lambda"
+            pure $ Typed b (TApp fTerm argTerm)
         _ -> Left "Application of a non lambda term"
 
 sameType :: TY t1 -> TY t2 -> Maybe (t1 :~: t2)
@@ -214,11 +193,23 @@ eval e (TVar n) = hLookupByHNat n e
 eval' :: Term '[] a -> a
 eval' = eval HNil
 
-evalToNat :: UTerm -> Either Text Natural
-evalToNat term = do
-    typed <- typeCheck EmptyTC term
-    case typed of
-        Typed ty tterm -> do
-            case ty of
-                TYNat -> Right $ eval' tterm
-                _ -> Left $ "typecheck result /= Nat: " <> T.pack (show ty)
+data UTermFold a = UTermFold
+    { fBool :: Bool -> a
+    , fNat :: Natural -> a
+    , fSucc :: a -> a
+    , fVar :: Text -> a
+    , fIf :: a -> a -> a -> a
+    , fApp :: a -> a -> a
+    , fLambda :: Text -> UType -> a -> a
+    , fNatElim :: a -> a -> a -> a
+    }
+
+foldUTerm :: UTermFold a -> UTerm -> a
+foldUTerm f (UBool a) = fBool f a
+foldUTerm f (UNat a) = fNat f a
+foldUTerm f (USucc a) = fSucc f (foldUTerm f a)
+foldUTerm f (UVar a) = fVar f a
+foldUTerm f (UIf a b c) = fIf f (foldUTerm f a) (foldUTerm f b) (foldUTerm f c)
+foldUTerm f (UApp a b) = fApp f (foldUTerm f a) (foldUTerm f b)
+foldUTerm f (ULambda a b c) = fLambda f a b (foldUTerm f c)
+foldUTerm f (UNatElim a b c) = fNatElim f (foldUTerm f a) (foldUTerm f b) (foldUTerm f c)

@@ -3,8 +3,9 @@
 
 module Main (main) where
 
-import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text qualified as T
+import Gen
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -12,7 +13,7 @@ import Numeric.Natural (Natural)
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.Hedgehog
-import Text.Megaparsec
+import Text.Megaparsec (errorBundlePretty)
 import TypedTC.AST qualified as AST
 import TypedTC.Checker
 import TypedTC.Parser qualified as P
@@ -33,12 +34,18 @@ properties =
     testGroup
         "Properties"
         [ testGroup
+            "Generators"
+            [ testPropertyNamed "term generator generates different sizes" "prop_term_gen_different_sizes" prop_term_gen_different_sizes
+            , testPropertyNamed "lambda term generator uses bound vars" "prop_lambda_gen_uses_bound_vars" prop_lambda_gen_uses_bound_vars
+            ]
+        , testGroup
             "Type checking"
             [ testPropertyNamed "can tc literal Nats" "prop_can_tc_nats" prop_can_tc_nats
             , testPropertyNamed "can tc literal Bools" "prop_can_tc_bools" prop_can_tc_bools
             , testPropertyNamed "can tc Succ" "prop_can_tc_succ" prop_can_tc_succ
             , testPropertyNamed "can tc id Nat" "prop_can_tc_id_nat" prop_can_tc_id_nat
             , testPropertyNamed "can tc if Nat" "prop_can_tc_if_nat" prop_can_tc_if_nat
+            , testPropertyNamed "can tc random terms" "prop_can_tc_random_terms" prop_can_tc_random_terms
             ]
         , testGroup
             "Evaluation"
@@ -47,6 +54,8 @@ properties =
             , testPropertyNamed "can sum" "prop_can_sum" prop_can_sum
             , testPropertyNamed "can mul" "prop_can_mul" prop_can_mul
             , testPropertyNamed "can fact" "prop_can_fact" prop_can_fact
+            , testPropertyNamed "can eval random nat terms" "prop_can_eval_random_nat_terms" prop_can_eval_random_nat_terms
+            , testPropertyNamed "can eval random bool terms" "prop_can_eval_random_bool_terms" prop_can_eval_random_bool_terms
             ]
         ]
 
@@ -131,15 +140,15 @@ units =
         ]
 
 checkType :: (MonadTest m, HasCallStack) => UTerm -> TY a -> m ()
-checkType uterm ty = do
-    typed <- evalEither (typeCheck EmptyTC uterm)
+checkType term ty = do
+    typed <- evalEither (typeCheck EmptyTC term)
     case typed of
         (Typed ty' _) -> do
             diff ty tyEq ty'
 
 assertType :: () => UTerm -> TY a -> Assertion
-assertType uterm ty = do
-    let res = typeCheck EmptyTC uterm
+assertType term ty = do
+    let res = typeCheck EmptyTC term
     case res of
         Right (Typed ty' _) -> do
             assertBool ("Invalid type: " <> show ty <> " /= " <> show ty') $ ty `tyEq` ty'
@@ -147,6 +156,52 @@ assertType uterm ty = do
 
 anyNatural :: Gen Natural
 anyNatural = Gen.integral (Range.linear 0 (2 * fromIntegral (maxBound :: Int)))
+
+utermSize :: UTerm -> Int
+utermSize = foldUTerm fold
+  where
+    fold =
+        UTermFold
+            { fBool = const 1
+            , fNat = const 1
+            , fSucc = (1 +)
+            , fVar = const 1
+            , fIf = \a b c -> a + b + c
+            , fApp = (+)
+            , fLambda = \_ _ a -> 1 + a
+            , fNatElim = \a b c -> a + b + c
+            }
+
+usesVar :: T.Text -> UTerm -> Bool
+usesVar name = foldUTerm fold
+  where
+    fold =
+        UTermFold
+            { fBool = const False
+            , fNat = const False
+            , fSucc = id
+            , fVar = (== name)
+            , fIf = \a b c -> a || b || c
+            , fApp = (||)
+            , fLambda = \_ _ a -> a
+            , fNatElim = \a b c -> a || b || c
+            }
+
+prop_term_gen_different_sizes :: Property
+prop_term_gen_different_sizes = property $ do
+    term <- forAll (uterm UTBool)
+    let s = utermSize term
+    cover 30 "Large term" (s > 30)
+    cover 10 "Small term" (s <= 10)
+
+prop_lambda_gen_uses_bound_vars :: Property
+prop_lambda_gen_uses_bound_vars = withTests 100 $ property $ do
+    fromT <- forAll utype
+    toT <- forAll utype
+    (name, _, body) <- forAll (lambdaTermParts fromT toT)
+    let bound = usesVar name body
+    cover 50 "Use bound vars" bound
+    cover 5 "Don't use bound vars" $ not bound
 
 prop_can_tc_nats :: Property
 prop_can_tc_nats = property $ do
@@ -173,6 +228,31 @@ prop_can_tc_if_nat = property $ do
     n <- forAll anyNatural
     m <- forAll anyNatural
     checkType (UIf (UBool True) (UNat n) (UNat m)) TYNat
+
+prop_can_tc_random_terms :: Property
+prop_can_tc_random_terms = withTests 300 $ property $ do
+    typ <- forAll utype
+    term <- forAll (uterm typ)
+    case utype2ty typ of
+        SomeType t -> checkType term t
+
+evalToNat :: UTerm -> Either T.Text Natural
+evalToNat term = do
+    typed <- typeCheck EmptyTC term
+    case typed of
+        Typed ty tterm -> do
+            case ty of
+                TYNat -> Right $ eval' tterm
+                _ -> Left $ "typecheck result /= Nat: " <> T.pack (show ty)
+
+evalToBool :: UTerm -> Either T.Text Bool
+evalToBool term = do
+    typed <- typeCheck EmptyTC term
+    case typed of
+        Typed ty tterm -> do
+            case ty of
+                TYBool -> Right $ eval' tterm
+                _ -> Left $ "typecheck result /= Bool: " <> T.pack (show ty)
 
 prop_can_succ :: Property
 prop_can_succ = property $ do
@@ -214,6 +294,18 @@ prop_can_fact = property $ do
   where
     gen = Gen.integral (Range.linear 0 8)
 
+prop_can_eval_random_nat_terms :: Property
+prop_can_eval_random_nat_terms = property $ do
+    term <- forAll (uterm UTNat)
+    res <- evalEither $ evalToNat term
+    Hedgehog.assert $ res >= 0
+
+prop_can_eval_random_bool_terms :: Property
+prop_can_eval_random_bool_terms = property $ do
+    term <- forAll (uterm UTBool)
+    res <- evalEither $ evalToBool term
+    Hedgehog.assert $ res || not res
+
 unit_can_tc_not :: Assertion
 unit_can_tc_not = assertType uNot (TYLambda TYBool TYBool)
 
@@ -232,18 +324,18 @@ unit_can_tc_fact = assertType uFact (TYLambda TYNat TYNat)
 unit_ast_not :: Assertion
 unit_ast_not = do
     Right (P.StExpr e) <- pure $ P.parseStatement "λ (b :: Bool) → if b then False else True"
-    Right uterm <- pure $ AST.ast e
-    uNot @?= uterm
+    Right term <- pure $ AST.ast e
+    uNot @?= term
 
 unit_ast_sum :: Assertion
 unit_ast_sum = do
     Right (P.StExpr e) <- pure $ P.parseStatement "(λ (n :: Nat) → (natElim (λ (n :: Nat) → n) (λ (_ :: Nat) (f :: Nat → Nat) → (λ (n :: Nat) → Succ (f n))) n))"
-    Right uterm <- pure $ AST.ast e
-    uterm @?= uSum
+    Right term <- pure $ AST.ast e
+    term @?= uSum
 
 dontTCCase :: UTerm -> TestTree
-dontTCCase uterm = testCase ("Untypeable: " <> show uterm) $ do
-    let typed = typeCheck EmptyTC uterm
+dontTCCase term = testCase ("Untypeable: " <> show term) $ do
+    let typed = typeCheck EmptyTC term
     case typed of
         Left _ -> pure ()
         Right (Typed ty _) -> assertFailure $ "Unexpected type check. Type: " <> show ty
