@@ -43,4 +43,5 @@ test-suite typedtc-test
       , containers
       , mtl
       , streams
+      , hint
       , typedtc

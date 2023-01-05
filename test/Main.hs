@@ -3,12 +3,14 @@
 
 module Main (main) where
 
+import Data.Either (fromRight)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Text qualified as T
 import Gen
 import Hedgehog
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import Language.Haskell.Interpreter qualified as Hint
 import Numeric.Natural (Natural)
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -77,6 +79,11 @@ units =
             , dontTCCase $ UApp (UBool True) (UBool True)
             , dontTCCase $ UNatElim (UBool True) (UBool True) (UNat 5)
             , dontTCCase $ UNatElim (UBool True) (ULambda "n" UTNat (ULambda "x" UTBool (UNat 42))) (UNat 5)
+            ]
+        , testGroup
+            "Typed terms"
+            [ testCase "valid typed term compiles" unit_valid_typed_term
+            , testCase "invalid typed term doesn't compile" unit_invalid_typed_term
             ]
         , testGroup
             "AST generation"
@@ -320,6 +327,30 @@ unit_can_tc_mul = assertType uMul (TYLambda TYNat (TYLambda TYNat TYNat))
 
 unit_can_tc_fact :: Assertion
 unit_can_tc_fact = assertType uFact (TYLambda TYNat TYNat)
+
+compiles :: String -> IO Bool
+compiles code = fromRight False <$> Hint.runInterpreter compile
+  where
+    compile = do
+        Hint.set
+            [ Hint.searchPath Hint.:= ["./src"]
+            , Hint.languageExtensions Hint.:= [Hint.DataKinds, Hint.RankNTypes, Hint.TypeFamilies]
+            ]
+        Hint.loadModules ["TypedTC.Checker"]
+        Hint.setImports ["Prelude", "TypedTC.Checker", "Data.HList"]
+        Hint.typeChecks code
+
+unit_invalid_typed_term :: Assertion
+unit_invalid_typed_term =
+    compiles
+        "TLambda TYBool (TIf (TVar (Proxy @('HSucc 'HZero))) (TBool False) (TBool True)) :: Term '[] (Bool -> Bool)"
+        >>= assertBool "Bad code compiles" . not
+
+unit_valid_typed_term :: Assertion
+unit_valid_typed_term =
+    compiles
+        "TLambda TYBool (TIf (TVar (Proxy @'HZero         )) (TBool False) (TBool True)) :: Term '[] (Bool -> Bool)"
+        >>= assertBool "Good code doesn't compile"
 
 unit_ast_not :: Assertion
 unit_ast_not = do

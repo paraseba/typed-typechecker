@@ -171,9 +171,6 @@ sameType (TYLambda a b) (TYLambda c d) = do
     pure Refl
 sameType _ _ = Nothing
 
--- shouldntCompile = TLambda TYBool (TIf (TVar (Proxy @('HSucc 'HZero))) (TBool False) (TBool True))
--- shouldCompile   = TLambda TYBool (TIf (TVar (Proxy @'HZero         )) (TBool False) (TBool True))
-
 eval :: HList env -> Term env a -> a
 eval _ (TBool b) = b
 eval e (TIf cond true false) = if eval e cond then eval e true else eval e false
